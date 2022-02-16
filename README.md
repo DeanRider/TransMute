@@ -20,5 +20,6 @@ Automation for a pipeline to identify and extract translocation and mutation inf
  and Ubuntu by S. Dean Rider Jr. and David C. Hitch January 2022.
 
  Example use: bash TransMuteDCH2 referencefile.fa readsfile.fa
+ 
  Example use: bash TransMuteDCH2
       then enter filenames when requested
