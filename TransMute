@@ -1,0 +1,1084 @@
+#!/bin/bash
+
+#set -x
+# WSL VERSION
+export PATH=$PATH:$HOME/bwa
+# Program Type
+#optype=`uname`
+
+# Starting Directory
+dirsource=`pwd`
+
+# #########################################################################
+#
+# This script is likely to only be used for mapping mutations 
+# in special cases
+# It calls bwa from the bwa folder in the home directory and
+# it calls the biostar59647 program from the jvarkit folder 
+# in the home directory
+# samtools is required and a permanent path must be set for 
+# this script to work
+# those three programs are the known dependencies
+#
+# NOTE: scripts run in shell must be allowed to be read, write and 
+# be executable
+# use case: chmod +x scriptfilename
+#
+# Created by S. Dean Rider Jr., June 2021 for the Leffak Lab
+# Revised and better annotated to include translocations October 2021
+# Modified to include file arguments and compatibility with Darwin 
+# and Ubuntu by S. Dean Rider Jr. and David C. Hitch January 2022
+#
+# Example use: bash TransMuteDCH2 referencefile.fa readsfile.fa
+# Example use: bash TransMuteDCH2
+#      then enter filenames when requested
+#
+# #########################################################################
+
+# #########################################################################
+#
+# exit script if anything fails
+#
+# #########################################################################
+
+set -e
+
+# #########################################################################
+#
+# tell user where to place files and ask for file names
+#
+# #########################################################################
+echo
+echo
+echo "WARNING: The identification of mismatches requires the reference sequences to be all upper case letters"
+echo
+echo "WARNING: THE ECTOPIC SITE MUST BE THE FIRST CHROMOSOME IN YOUR REFERENCE FILE"
+echo
+
+if [ -f "$2" ]
+then
+  referencefile="$1"
+  readsfile="$2"
+else
+  echo
+  echo Place reference.fa and sequence.fa or .fq reads into bwa folder
+  echo
+  read -p "Enter the name of your reference sequence file: " referencefile
+  read -p "Enter the name of your sequence reads file: " readsfile
+  echo
+fi
+
+# Current Directory
+dircurrent=`pwd`
+
+# Move files and verify om bwa directory
+if [ "$dircurrent" != "$HOME/bwa" ]
+then
+  mv $referencefile $HOME/bwa
+  mv $readsfile $HOME/bwa
+  cd $HOME/bwa
+fi
+
+echo
+echo This script is for a mapping single reads and not paired reads
+echo
+echo
+echo NOTE: If indexing and mapping appear to have already been done, these steps will be skipped
+echo
+
+# these inputs become $referencefile and $readsfile variables in the script
+
+# #########################################################################
+#
+# continue script with input parameters of reference and reads file names
+# NOTE: Double clicked scripts are presumed to be in the home location so 
+# change directory to execute the dependent programs properly
+#
+# #########################################################################
+
+echo "Mapping Run Progress Log" > $referencefile.$readsfile.log
+echo Reference file is $referencefile >> $referencefile.$readsfile.log
+echo Reads file is $readsfile >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+# #########################################################################
+#
+# index and align reads to reference if not already done
+#
+# #########################################################################
+
+echo
+echo Checking for index files
+echo Checking for index files >> $referencefile.$readsfile.log
+
+if [ -e $referencefile.bwt ]
+then
+  echo $referencefile.bwt found, Skipping Indexing of Reference
+  echo $referencefile.bwt found, Skipping Indexing of Reference >> $referencefile.$readsfile.log
+else
+  echo Indexing reference $referencefile with bwa
+  echo Indexing reference $referencefile with bwa >> $referencefile.$readsfile.log
+  echo
+  bwa index $referencefile
+  echo Indexing completed successfully >> $referencefile.$readsfile.log
+  date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+  echo
+fi
+
+echo
+echo Checking for existing .sam files
+
+if [ -e $referencefile.sam ]
+then
+  echo $referencefile.sam found, Skipping Mapping of Reads
+  echo $referencefile.sam found, Skipping Mapping of Reads >> $referencefile.$readsfile.log
+else
+  echo Mapping reads $readsfile onto reference $referencefile with bwa mem
+  echo Mapping reads $readsfile onto reference $referencefile with bwa mem >> $referencefile.$readsfile.log
+  echo
+  bwa mem $referencefile $readsfile > $referencefile.sam  #./bwa changed to bwa
+  echo Mapping completed successfully >> $referencefile.$readsfile.log
+  date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+fi
+
+# #########################################################################
+#
+# Generate .fai, .dict files and no longer use GATK for this
+#
+# #########################################################################
+
+echo
+echo Generating $referencefile .fai file for future use
+samtools fqidx $referencefile -o $referencefile.fai
+echo
+echo Making .dict file for future use
+samtools dict $referencefile > $referencefile.dict
+
+echo .fai, .dict files completed successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# #########################################################################
+#
+# while you are here, might as well get read depth out of the way
+#
+# #########################################################################
+
+echo
+echo Determining depth of coverage
+samtools view -S -b $referencefile.sam > $referencefile.bam
+samtools sort $referencefile.bam -o $referencefile.sorted.bam
+wait
+samtools depth -d 2000000 $referencefile.sorted.bam > $referencefile.DepthOfCoverage.out
+wait
+echo
+echo Adding Headers to Data files and removing some unwanted files
+echo reference position depth > DepthHeader
+cat DepthHeader $referencefile.DepthOfCoverage.out > $referencefile.DepthOfCoverage.txt
+
+rm DepthHeader
+rm $referencefile.DepthOfCoverage.out
+
+echo Depth of coverage determined successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# #########################################################################
+#
+# generate track to visualize in IVG
+#
+# #########################################################################
+
+echo
+echo Generating indexed reads track to visualize in IVG
+samtools index $referencefile.sorted.bam
+
+echo IGV tracks generated successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# #########################################################################
+#
+# Process .sam file to count mismatches at each position mapped etc
+#
+# #########################################################################
+
+echo
+echo Expanding .sam file into .xml file
+echo
+
+# NOTE: File path is given here and could break the script if it is not strictly maintained on other systems
+java -jar ../jvarkit/dist/biostar59647.jar -r $referencefile $referencefile.sam | \xmllint --format - > $referencefile.XMLlist.txt
+
+echo XML generated successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+java -jar ../jvarkit/dist/sam2tsv.jar -R $referencefile $referencefile.bam > $referencefile.TSVlist.txt
+
+echo TSV generated successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+echo
+echo Extracting names and mismatches from xml file and making mischief
+egrep -w '.*name.*|mismatch\=' $referencefile.XMLlist.txt | egrep -vw 'read\-base\=\"N\"' > $referencefile.Names_mismatches_Allreads.txt
+
+# grep out only mismatch lines 
+egrep -w 'mismatch\=|<D|<I' $referencefile.XMLlist.txt | egrep -vw 'read\-base\=\"N\"' | cut -d' ' -f9-11 | sort | uniq -c > $referencefile.counted.mismatches.out
+
+
+# clean up file to remove unwanted lowercase text, spaces, and symbols
+sed -e 's/^[ /t]*//' $referencefile.counted.mismatches.out > $referencefile.counted.mismatchesnoleadingspaces.out
+wait
+sed 's/[-a-z\=\"]//g' $referencefile.counted.mismatchesnoleadingspaces.out > $referencefile.Mischief.Managed.out
+wait
+egrep -w '.*name.*|mismatch\=|<I|<D' $referencefile.XMLlist.txt | egrep -vw 'read\-base\=\"N\"' > $referencefile.Names_MID_Allreads.txt
+
+echo
+echo Adding Headers to Data files and removing some unwanted files
+echo count mismatch_base position reference_base > MismatchHeader
+cat MismatchHeader $referencefile.Mischief.Managed.out > $referencefile.Mismatches.Counted.txt
+rm MismatchHeader
+rm *.out
+
+echo Mismatch counts generated successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+echo
+
+# #########################################################################
+#
+# NOW PROCESSING CHIMERIC AND NON CHIMERIC READ SETS SEPARATELY
+# Extract full length 0 and 16 in column 2 lines
+#
+# #########################################################################
+
+echo NOW PROCESSING CHIMERIC AND NON CHIMERIC READ SETS SEPARATELY
+echo  "Extract full length 0 and 16 in column 2 lines"
+awk -F "\t" '$2 ==0' $referencefile.sam > $referencefile.Full_Length.out
+awk -F "\t" '$2 ==16' $referencefile.sam >> $referencefile.Full_Length.out
+
+echo Extract full length 0 and 16 in column 2 lines completed successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# ****** SDR Replaced section to deal with other chromosome  prefixes ****
+
+# #########################################################################
+#
+# Extract lines with chromosome to chromosome chimeras (NC_, NT_, NW_)
+# Then extract other chimeras followed by non chimeras
+# the || true prevents throwing an error if the command is not executable or generates an  error
+#
+# #########################################################################
+
+echo
+echo "Extract lines with N._ followed by SA:Z:N._  or extract the opposite"
+grep 'N._.*SA:Z:N._.*' $referencefile.Full_Length.out >  $referencefile.sam.Chrom_Chrom.out || true
+echo "  chrom to chrom extracted"
+grep -v 'N._.*SA:Z:N._.*' $referencefile.Full_Length.out >  $referencefile.sam.NOT_Chrom_Chrom.out || true
+echo "  opposite of chrom to chrom extracted"
+
+echo "Get N._ first or SA:Z:N._ second chimeras from opposite of N._ to SA:Z:N._"
+grep 'N._.*SA:Z:.*' $referencefile.sam.NOT_Chrom_Chrom.out > $referencefile.sam.Ecto_Chrom.out || true
+grep 'SA:Z:N._.*' $referencefile.sam.NOT_Chrom_Chrom.out >> $referencefile.sam.Ecto_Chrom.out || true
+echo "  ectopic to chrom extracted"
+
+echo "Eliminate N._ first or N._ second chimeras from opposite of N._ to SA:Z:N._"
+grep -v 'SA:Z:N._.*' $referencefile.sam.NOT_Chrom_Chrom.out > $referencefile.sam.NoChromSecond.out || true
+grep -v 'N._.*SA:Z:.*' $referencefile.sam.NoChromSecond.out > $referencefile.sam.Ecto_Only.out || true
+echo "  ectopics only extracted"
+
+
+# ecto only might have ecto without a translocation, so one more step needed
+grep '.*SA:Z:.*' $referencefile.sam.Ecto_Only.out > $referencefile.sam.Ecto_Ecto.out || true
+echo "  ectopic to ectopic extracted"
+
+
+grep -v '.*SA:Z:.*' $referencefile.sam.Ecto_Only.out > $referencefile.sam.NonChimeric.out || true
+echo "  non chimeric reads extracted"
+
+echo Separation of read types completed successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# ****** end of Replaced section ****
+#
+#echo Separation of read types completed successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# #########################################################################
+#
+# Convert lines to Fasta using only column 1 and 10
+#
+# #########################################################################
+
+echo
+echo "Converting lines to Fasta using only column 1 and 10"
+echo "  Chrom_Chrom reads"
+awk -F "\t" '{{OFS="\n"};sub(/^/, ">");print $1,$10}' $referencefile.sam.Chrom_Chrom.out > $referencefile.sam.Chrom_Chrom.fa
+echo "  Ecto_Chrom reads"
+awk -F "\t" '{{OFS="\n"};sub(/^/, ">");print $1,$10}' $referencefile.sam.Ecto_Chrom.out > $referencefile.sam.Ecto_Chrom.fa
+echo "  Ecto_Ecto reads"
+awk -F "\t" '{{OFS="\n"};sub(/^/, ">");print $1,$10}' $referencefile.sam.Ecto_Ecto.out > $referencefile.sam.Ecto_Ecto.fa
+echo "  NonChimeric reads"
+awk -F "\t" '{{OFS="\n"};sub(/^/, ">");print $1,$10}' $referencefile.sam.NonChimeric.out > $referencefile.sam.NonChimeric.fa
+
+echo New read sets converted to fasta successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# #########################################################################
+#
+# re-map new fasta files against reference
+#
+# #########################################################################
+
+# I do not know how to prevent script exit if these fail due to empty fasta files
+# no .sam files would be created, so try || true in subsequent manipulations with .sam files
+
+echo
+echo "Re-mapping new fasta files against reference"
+echo
+echo Mapping Chrom_Chrom reads
+bwa mem $referencefile $referencefile.sam.Chrom_Chrom.fa > $referencefile.Chrom_Chrom.sam  #./bwa changed to bwa
+wait
+echo
+echo Mapping Ecto_Chrom reads
+bwa mem $referencefile $referencefile.sam.Ecto_Chrom.fa > $referencefile.Ecto_Chrom.sam   #./bwa changed to bwa
+wait
+echo
+echo Mapping Ecto_Ecto reads
+bwa mem $referencefile $referencefile.sam.Ecto_Ecto.fa > $referencefile.Ecto_Ecto.sam  #./bwa changed to bwa
+wait
+echo
+echo Mapping NonChimeric reads
+bwa mem $referencefile $referencefile.sam.NonChimeric.fa > $referencefile.NonChimeric.sam   #./bwa changed to bwa
+wait
+
+echo New read sets mapped to reference successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# #########################################################################
+#
+# generate depth  of coverages and igv tracks for new read sets
+#
+# #########################################################################
+
+
+echo
+echo Will use existing $referencefile .fai file for new read sets
+# samtools fqidx $referencefile -o $referencefile.fai
+echo
+echo Will use existing .dict file for new read sets
+# samtools dict $referencefile > $referencefile.dict
+echo
+echo "Compressing .sam files into .bam files"
+echo "  Chrom_Chrom reads"
+samtools view -S -b $referencefile.Chrom_Chrom.sam > $referencefile.Chrom_Chrom.bam
+echo "  Ecto_Chrom reads"
+samtools view -S -b $referencefile.Ecto_Chrom.sam > $referencefile.Ecto_Chrom.bam
+echo "  Ecto_Ecto reads"
+samtools view -S -b $referencefile.Ecto_Ecto.sam > $referencefile.Ecto_Ecto.bam
+echo "  NonChimeric reads"
+samtools view -S -b $referencefile.NonChimeric.sam > $referencefile.NonChimeric.bam
+
+echo New read sets .bam files made successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+echo
+echo "Sorting .bam files"
+echo "  Chrom_Chrom reads"
+samtools sort $referencefile.Chrom_Chrom.bam -o $referencefile.Chrom_Chrom.sorted.bam
+echo "  Ecto_Chrom reads"
+samtools sort $referencefile.Ecto_Chrom.bam -o $referencefile.Ecto_Chrom.sorted.bam
+echo "  Ecto_Ecto reads"
+samtools sort $referencefile.Ecto_Ecto.bam -o $referencefile.Ecto_Ecto.sorted.bam
+echo "  NonChimeric reads"
+samtools sort $referencefile.NonChimeric.bam -o $referencefile.NonChimeric.sorted.bam
+
+echo New read sets .bam files sorted successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+echo
+echo "Determining depth of coverage for each data set"
+echo reference position depth > DepthHeader
+echo "  Chrom_Chrom reads"
+samtools depth -d 2000000 $referencefile.Chrom_Chrom.sorted.bam > $referencefile.Chrom_Chrom.DepthOfCoverage.out
+wait
+cat DepthHeader $referencefile.Chrom_Chrom.DepthOfCoverage.out > $referencefile.Chrom_Chrom.DepthOfCoverage.txt
+echo "  Ecto_Chrom reads"
+samtools depth -d 2000000 $referencefile.Ecto_Chrom.sorted.bam > $referencefile.Ecto_Chrom.DepthOfCoverage.out
+wait
+cat DepthHeader $referencefile.Ecto_Chrom.DepthOfCoverage.out > $referencefile.Ecto_Chrom.DepthOfCoverage.txt
+echo "  Ecto_Ecto reads"
+samtools depth -d 2000000 $referencefile.Ecto_Ecto.sorted.bam > $referencefile.Ecto_Ecto.DepthOfCoverage.out
+wait
+cat DepthHeader $referencefile.Ecto_Ecto.DepthOfCoverage.out > $referencefile.Ecto_Ecto.DepthOfCoverage.txt
+echo "  NonChimeric reads"
+samtools depth -d 2000000 $referencefile.NonChimeric.sorted.bam > $referencefile.NonChimeric.DepthOfCoverage.out
+wait
+cat DepthHeader $referencefile.NonChimeric.DepthOfCoverage.out > $referencefile.NonChimeric.DepthOfCoverage.txt
+rm DepthHeader
+rm *.DepthOfCoverage.out
+
+echo New read sets Depth of coverage determined successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# generate track to visualize in IVG
+echo
+echo "Generating indexed reads track to visualize in IVG"
+echo "  Chrom_Chrom reads"
+samtools index $referencefile.Chrom_Chrom.sorted.bam
+echo "  Ecto_Chrom reads"
+samtools index $referencefile.Ecto_Chrom.sorted.bam
+echo "  Ecto_Ecto reads"
+samtools index $referencefile.Ecto_Ecto.sorted.bam
+echo "  NonChimeric reads"
+samtools index $referencefile.NonChimeric.sorted.bam
+
+echo New read sets IGV files made successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# #########################################################################
+#
+# need to generate xml files, split reads and number file lines, concatenate, sort, count MID
+#
+# #########################################################################
+
+echo
+echo
+echo "Expanding .sam files into .xml files"
+echo
+echo "  Chrom_Chrom reads" 
+# NOTE: File path is given here and could break the script if it is not strictly maintained on other systems
+java -jar ../jvarkit/dist/biostar59647.jar -r $referencefile $referencefile.Chrom_Chrom.sam |\xmllint --format - > $referencefile.Chrom_Chrom.XMLlist.txt
+echo
+echo "  Ecto_Chrom reads"
+java -jar ../jvarkit/dist/biostar59647.jar -r $referencefile $referencefile.Ecto_Chrom.sam |\xmllint --format - > $referencefile.Ecto_Chrom.XMLlist.txt
+echo
+echo "  Ecto_Ecto reads"
+java -jar ../jvarkit/dist/biostar59647.jar -r $referencefile $referencefile.Ecto_Ecto.sam |\xmllint --format - > $referencefile.Ecto_Ecto.XMLlist.txt
+echo
+echo "  NonChimeric reads"
+java -jar ../jvarkit/dist/biostar59647.jar -r $referencefile $referencefile.NonChimeric.sam |\xmllint --format - > $referencefile.NonChimeric.XMLlist.txt
+
+echo New read sets XML files made successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+echo expanding .bam files into .tsv files
+echo
+java -jar ../jvarkit/dist/sam2tsv.jar -R $referencefile $referencefile.Chrom_Chrom.bam > $referencefile.Chrom_Chrom.TSVlist.txt
+java -jar ../jvarkit/dist/sam2tsv.jar -R $referencefile $referencefile.Ecto_Chrom.bam > $referencefile.Ecto_Chrom.TSVlist.txt
+java -jar ../jvarkit/dist/sam2tsv.jar -R $referencefile $referencefile.Ecto_Ecto.bam > $referencefile.Ecto_Ecto.TSVlist.txt
+java -jar ../jvarkit/dist/sam2tsv.jar -R $referencefile $referencefile.NonChimeric.bam > $referencefile.NonChimeric.TSVlist.txt
+
+echo New read sets TSV files made successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+echo
+
+# ********* altering csplit region  **************
+
+# **** commenting out old region below ****
+#echo
+#echo "Splitting xml files into single reads per file"
+#echo
+#echo Chrom_Chrom reads
+#csplit -n 5 -s -f $referencefile.Chrom_Chromx. $referencefile.Chrom_Chrom.XMLlist.txt '/<read>/' '{*}'  #gcsplit changed to csplit
+#echo
+#echo Ecto_Chrom reads
+#csplit -n 5 -s -f $referencefile.Ecto_Chromx. $referencefile.Ecto_Chrom.XMLlist.txt '/<read>/' '{*}'  #gcsplit changed to csplit
+#echo
+#echo Ecto_Ecto reads
+#csplit -n 5 -s -f $referencefile.Ecto_Ectox. $referencefile.Ecto_Ecto.XMLlist.txt '/<read>/' '{*}'   #gcsplit changed to csplit
+#echo
+#echo NonChimeric reads
+#csplit -n 5 -s -f $referencefile.NonChimericx. $referencefile.NonChimeric.XMLlist.txt '/<read>/' '{*}'  #gcsplit changed to csplit
+# **** end of old region ****
+
+# **** Beginning of new scripting that also works in ubuntu ****
+# changed to use csplit for use in both Linux and MAC OSX
+# required determination of known quantity for repeat parameter
+echo
+echo "Splitting xml files into single reads per file" 
+echo
+echo Chrom_Chrom reads
+read_count=$(grep '<read>' $referencefile.Chrom_Chrom.XMLlist.txt | wc -l)
+echo "$read_count is read_count"
+if [ $read_count != 0 ]
+then
+(( read_count=read_count-1 ))
+echo splitting reads
+csplit -n 6 -s -f $referencefile.Chrom_Chromx. $referencefile.Chrom_Chrom.XMLlist.txt '/<read>/' "{$read_count}"
+else
+echo no reads to split
+fi
+
+echo
+
+echo Ecto_Chrom reads
+read_count=$(grep '<read>' $referencefile.Ecto_Chrom.XMLlist.txt | wc -l)
+echo "$read_count is read_count"
+if [ $read_count != 0 ]
+then
+(( read_count=read_count-1 ))
+echo splitting reads
+csplit -n 6 -s -f $referencefile.Ecto_Chromx. $referencefile.Ecto_Chrom.XMLlist.txt '/<read>/' "{$read_count}"
+else
+echo no reads to split
+fi
+
+echo
+
+echo Ecto_Ecto reads
+read_count=$(grep '<read>' $referencefile.Ecto_Ecto.XMLlist.txt | wc -l)
+echo "$read_count is read_count"
+if [ $read_count != 0 ]
+then
+(( read_count=read_count-1 ))
+echo splitting reads
+csplit -n 6 -s -f $referencefile.Ecto_Ectox. $referencefile.Ecto_Ecto.XMLlist.txt '/<read>/' "{$read_count}"
+else
+echo no reads to split
+fi
+
+echo
+
+echo NonChimeric reads
+read_count=$(grep '<read>' $referencefile.NonChimeric.XMLlist.txt | wc -l)
+echo "$read_count is read_count"
+if [ $read_count != 0 ]
+then
+(( read_count=read_count-1 ))
+echo splitting reads
+csplit -n 6 -s -f $referencefile.NonChimericx. $referencefile.NonChimeric.XMLlist.txt '/<read>/' "{$read_count}"
+else
+echo no reads to split
+fi
+
+echo
+
+# ********* end of new region  ****************
+
+echo New read sets split files made successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# Move groups of files into folders
+echo
+echo "Moving split read files into folders"
+mkdir Chrom_Chrom
+mkdir Ecto_Chrom
+mkdir Ecto_Ecto
+mkdir NonChimeric
+
+echo "  Chrom_Chrom reads"
+mv $referencefile.Chrom_Chromx.* $HOME/bwa/Chrom_Chrom/ || true
+echo "  Ecto_Chrom reads"
+mv $referencefile.Ecto_Chromx.* $HOME/bwa/Ecto_Chrom/ || true
+echo "  Ecto_Ecto reads"
+mv $referencefile.Ecto_Ectox.*  $HOME/bwa/Ecto_Ecto/ || true
+echo "  NonChimeric reads"
+mv $referencefile.NonChimericx.* $HOME/bwa/NonChimeric/ || true
+
+echo New read sets moved to folders successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# #########################################################################
+#
+# will need to follow primary vs secondary mappings for chrom_chrom and ecto_ecto
+# SUPPLEMENTARY_ALIGNMENT="true"> means what it says
+# will need to evaluate ectopic vs chrom for translocations
+# <chrom index="0"> means ectopic site IF !!!ectopic site is first chromosome in reference file!!!
+# just compile data for NonChimeric
+#
+# #########################################################################
+
+
+# ########################################
+# ECTOPIC TO CHROMOSOMAL TRANSLOCATIONS
+# ########################################
+
+echo
+echo
+echo ECTOPIC TO CHROMOSOMAL TRANSLOCATIONS BEING PROCESSED
+# Sort files into ectopic site versus chromosomal site
+echo Sort files into ectopic site versus chromosomal site
+cd $HOME/bwa/Ecto_Chrom
+
+mkdir folder_ecto
+mkdir folder_chrom
+
+# former version used -Z to avoid new line added to filenames, was recursive, and evaluated regex
+# grep -i -Z -r -l --exclude-dir=folder* "<chrom index=\"0\">" . | xargs -I{} mv {} ./folder_ecto
+# better version via DCH works in both ubuntu and os and does not eval regex by using -F and is not recursive:
+# however getting file 99 with tons of extra stuff....counter off during split?
+grep -F -li --exclude-dir=folder* '<chrom index="0">' * | xargs -I '{}' mv '{}' $HOME/bwa/Ecto_Chrom/folder_ecto
+grep -F -liv --exclude-dir=folder* '<chrom index="0">' * | xargs -I '{}' mv '{}' $HOME/bwa/Ecto_Chrom/folder_chrom
+
+# Compile all ectopic site data and add line numbers after removing soft clipped lines
+echo Compile all ectopic site data and add line numbers after removing soft clipped lines
+
+cd $HOME/bwa/Ecto_Chrom/folder_ecto
+
+echo Checking for Ecto_Chromx files
+echo Checking for Ecto_Chromx files >> ../../$referencefile.$readsfile.log
+files=$(ls *.Ecto_Chromx.* 2> /dev/null | wc -l)
+echo $files files detected
+echo $files files detected >> ../../$referencefile.$readsfile.log
+
+if [ $files != 0 ]
+then
+  perl -i.bak -pe '/<S/d' $referencefile.Ecto_Chromx.*
+  #CHANGED TO ABOVE  sed -i '.bak' '/<S/d' $referencefile.Ecto_Chromx.*
+  mkdir backup
+  mv *.bak ./backup
+#  Trying a grep solution to cat -n not restarting the numbering:
+  grep -n '' $referencefile.Ecto_Chromx.* >> NumberedMatches.out || true
+  # Collect Mismatches, Insertions, Deletions
+  echo Collect Mismatches, Insertions, Deletions
+  egrep '<I' NumberedMatches.out > NumberedInsertionsEctoSide_EC.out || true
+  egrep '<D' NumberedMatches.out > NumberedDeletionsEctoSide_EC.out || true
+  egrep 'mismatch' NumberedMatches.out > NumberedMismatchesEctoSide_EC.out || true
+  # Now to cut out first column, sort, uniq count
+  echo Now to cut out first column, sort, uniq count
+  cat NumberedInsertionsEctoSide_EC.out | cut -d: -f2 > CutNumberedInsertionsEctoSide_EC.out
+  cat NumberedDeletionsEctoSide_EC.out | cut -d: -f2 > CutNumberedDeletionsEctoSide_EC.out
+  cat NumberedMismatchesEctoSide_EC.out | cut -d: -f2 > CutNumberedMismatchesEctoSide_EC.out
+  # Now Count MID and subtract 9 from position because of lines of read information preceding matching lines information
+  echo Now Count MID and subtract 9 from position because of lines of read information preceding matching lines information
+  echo -e "position\tcount" > CountedNumberedInsertionsEctoSide_EC.txt
+  echo -e "position\tcount" > CountedNumberedDeletionsEctoSide_EC.txt
+  echo -e "position\tcount" > CountedNumberedMismatchesEctoSide_EC.txt
+  cat CutNumberedInsertionsEctoSide_EC.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedInsertionsEctoSide_EC.txt
+  cat CutNumberedDeletionsEctoSide_EC.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedDeletionsEctoSide_EC.txt
+  cat CutNumberedMismatchesEctoSide_EC.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedMismatchesEctoSide_EC.txt
+
+  rm *.out
+  rm -r backup || true
+  rm *x.*
+
+else
+  echo NO ectopic site data to process
+fi
+
+
+# Compile all chromosomal site data and add line numbers  after removing soft clipped lines
+echo Compile all chromosomal site data and add line numbers  after removing soft clipped lines
+
+# **** had to change to folder_chrom, was folder_ecto in prior version
+cd $HOME/bwa/Ecto_Chrom/folder_chrom
+
+echo Checking for Ecto_Chromx files
+echo Checking for Ecto_Chromx files >> ../../$referencefile.$readsfile.log
+files=$(ls *.Ecto_Chromx.* 2> /dev/null | wc -l)
+echo $files files detected
+echo $files files detected >> ../../$referencefile.$readsfile.log
+
+if [ $files != 0 ]
+then
+perl -i.bak -pe '/<S/d' $referencefile.Ecto_Chromx.*
+#CHANGED TO ABOVE   sed -i '.bak' '/<S/d' $referencefile.Ecto_Chromx.*
+  mkdir backup
+  mv *.bak ./backup
+
+  grep -n '' $referencefile.Ecto_Chromx.* >> NumberedMatches.out || true
+  # Collect Mismatches, Insertions, Deletions
+  echo Collect Mismatches, Insertions, Deletions
+  egrep '<I' NumberedMatches.out > NumberedInsertionsChromSide_EC.out || true
+  egrep '<D' NumberedMatches.out > NumberedDeletionsChromSide_EC.out || true
+  egrep 'mismatch' NumberedMatches.out > NumberedMismatchesChromSide_EC.out || true
+  # Now to cut out first column, sort, uniq count
+  echo Now to cut out first column, sort, uniq count
+  cat NumberedInsertionsChromSide_EC.out | cut -d: -f2 > CutNumberedInsertionsChromSide_EC.out
+  cat NumberedDeletionsChromSide_EC.out | cut -d: -f2 > CutNumberedDeletionsChromSide_EC.out
+  cat NumberedMismatchesChromSide_EC.out | cut -d: -f2 > CutNumberedMismatchesChromSide_EC.out
+  # Now Count MID and subtract 9 from position because of lines of read information preceding matching lines information
+  echo Now Count MID and subtract 9 from position because of lines of read information preceding matching lines information
+  echo -e "position\tcount" > CountedNumberedInsertionsChromSide_EC.txt
+  echo -e "position\tcount" > CountedNumberedDeletionsChromSide_EC.txt
+  echo -e "position\tcount" > CountedNumberedMismatchesChromSide_EC.txt
+  cat CutNumberedInsertionsChromSide_EC.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedInsertionsChromSide_EC.txt
+  cat CutNumberedDeletionsChromSide_EC.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedDeletionsChromSide_EC.txt
+  cat CutNumberedMismatchesChromSide_EC.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedMismatchesChromSide_EC.txt
+
+  rm *.out
+  rm -r backup || true
+  rm *x.*
+
+else
+  echo NO chromosomal site data to process
+fi
+
+
+
+# ########################################
+# CHROMOSOMAL TO CHROMOSOMAL TRANSLOCATIONS
+# ########################################
+
+echo
+echo
+echo  CHROMOSOMAL TO CHROMOSOMAL TRANSLOCATIONS BEING PROCESSED
+# Sort files into primary or secondary mappings
+echo Sort files into primary or secondary mappings
+
+cd $HOME/bwa
+
+echo Ectopic to Chromosomal translocation mutations counted successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+cd $HOME/bwa/Chrom_Chrom
+
+mkdir folder_primary
+mkdir folder_secondary
+
+grep -F -li --exclude-dir=folder* 'SUPPLEMENTARY_ALIGNMENT="true"' * | xargs -I '{}' mv '{}' $HOME/bwa/Chrom_Chrom/folder_secondary
+grep -F -li --exclude-dir=folder* 'SUPPLEMENTARY_ALIGNMENT="false"' * | xargs -I '{}' mv '{}' $HOME/bwa/Chrom_Chrom/folder_primary
+
+# Compile primary mapping data and add line numbers after removing soft clipped lines
+echo Compile primary mapping data and add line numbers after removing soft clipped lines
+
+cd $HOME/bwa/Chrom_Chrom/folder_primary
+
+echo Checking for primary mapping files
+echo Checking for primary mapping files >> ../../$referencefile.$readsfile.log
+files=$(ls *.Chrom_Chromx.* 2> /dev/null | wc -l)
+echo $files files detected
+echo $files files detected >> ../../$referencefile.$readsfile.log
+
+if [ $files != 0 ]
+then
+ perl -i.bak -pe '/<S/d' $referencefile.Chrom_Chromx.*
+
+#CHNGED TO ABOVE  sed -i '.bak' '/<S/d' $referencefile.Chrom_Chromx.*
+  mkdir backup
+  mv *.bak ./backup
+
+  grep -n '' $referencefile.Chrom_Chromx.* >> NumberedMatches.out || true
+  # Collect Mismatches, Insertions, Deletions
+  echo Collect Mismatches, Insertions, Deletions
+  egrep '<I' NumberedMatches.out > NumberedInsertionsPrimarySide_CC.out || true
+  egrep '<D' NumberedMatches.out > NumberedDeletionsPrimarySide_CC.out || true
+  egrep 'mismatch' NumberedMatches.out > NumberedMismatchesPrimarySide_CC.out || true
+  # Now to cut out first column, sort, uniq count
+  echo Now to cut out first column, sort, uniq count
+  cat NumberedInsertionsPrimarySide_CC.out | cut -d: -f2 > CutNumberedInsertionsPrimarySide_CC.out
+  cat NumberedDeletionsPrimarySide_CC.out | cut -d: -f2 > CutNumberedDeletionsPrimarySide_CC.out
+  cat NumberedMismatchesPrimarySide_CC.out | cut -d: -f2 > CutNumberedMismatchesPrimarySide_CC.out
+  # Now Count MID and subtract 9 from position because of lines of read information preceding matching lines information
+  echo Now Count MID and subtract 9 from position because of lines of read information preceding matching lines information
+  echo -e "position\tcount" > CountedNumberedInsertionsPrimarySide_CC.txt
+  echo -e "position\tcount" > CountedNumberedDeletionsPrimarySide_CC.txt
+  echo -e "position\tcount" > CountedNumberedMismatchesPrimarySide_CC.txt
+  cat CutNumberedInsertionsPrimarySide_CC.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedInsertionsPrimarySide_CC.txt
+  cat CutNumberedDeletionsPrimarySide_CC.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedDeletionsPrimarySide_CC.txt
+  cat CutNumberedMismatchesPrimarySide_CC.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedMismatchesPrimarySide_CC.txt
+
+  rm *.out
+  rm -r backup || true
+  rm *x.*
+
+else
+  echo NO primary mapping site data to process
+fi
+
+# Compile secondary mapping data and add line numbers
+echo Compile secondary mapping data and add line numbers
+cd $HOME/bwa/Chrom_Chrom/folder_secondary
+
+echo Checking for secondary mapping files
+echo Checking for secondary mapping files >> ../../$referencefile.$readsfile.log
+files=$(ls *.Chrom_Chromx.* 2> /dev/null | wc -l)
+echo $files files detected
+echo $files files detected >> ../../$referencefile.$readsfile.log
+
+if [ $files != 0 ]
+then
+  # Collect Mismatches, Insertions, Deletions
+  echo Collect Mismatches, Insertions, Deletions
+  grep -n '' $referencefile.Chrom_Chromx.* >> NumberedMatches.out || true
+  egrep '<I' NumberedMatches.out > NumberedInsertionsSecondSide_CC.out || true
+  egrep '<D' NumberedMatches.out > NumberedDeletionsSecondSide_CC.out || true
+  egrep 'mismatch' NumberedMatches.out > NumberedMismatchesSecondSide_CC.out || true
+  # Now to cut out first column, sort, uniq count
+  echo Now to cut out first column, sort, uniq count
+  cat NumberedInsertionsSecondSide_CC.out | cut -d: -f2 > CutNumberedInsertionsSecondSide_CC.out
+  cat NumberedDeletionsSecondSide_CC.out | cut -d: -f2 > CutNumberedDeletionsSecondSide_CC.out
+  cat NumberedMismatchesSecondSide_CC.out | cut -d: -f2 > CutNumberedMismatchesSecondSide_CC.out
+  # Now Count MID and subtract 9 from position because of lines of read information preceding matching lines information
+  echo Now Count MID and subtract 9 from position because of lines of read information preceding matching lines information
+  echo -e "position\tcount" > CountedNumberedInsertionsSecondSide_CC.txt
+  echo -e "position\tcount" > CountedNumberedDeletionsSecondSide_CC.txt
+  echo -e "position\tcount" > CountedNumberedMismatchesSecondSide_CC.txt
+  cat CutNumberedInsertionsSecondSide_CC.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedInsertionsSecondSide_CC.txt
+  cat CutNumberedDeletionsSecondSide_CC.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedDeletionsSecondSide_CC.txt
+  cat CutNumberedMismatchesSecondSide_CC.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedMismatchesSecondSide_CC.txt
+
+  rm *.out
+  rm -r backup || true
+  rm *x.*
+
+else
+  echo NO secondary mapping site data to process
+fi
+
+
+
+# ########################################
+# ECTOPIC TO ECTOPIC TRANSLOCATIONS
+# ########################################
+
+echo
+echo
+echo ECTOPIC TO ECTOPIC TRANSLOCATIONS BEING PROCESSED
+# Sort files into primary or secondary mappings
+cd
+cd bwa  #CHANGED FROM bwa*
+echo Chromosomal to Chromosomal translocation mutations counted successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+cd $HOME/bwa/Ecto_Ecto
+
+mkdir folder_primary
+mkdir folder_secondary
+
+grep -F -li --exclude-dir=folder* 'SUPPLEMENTARY_ALIGNMENT="true"' * | xargs -I '{}' mv '{}' $HOME/bwa/Ecto_Ecto/folder_secondary
+grep -F -li --exclude-dir=folder* 'SUPPLEMENTARY_ALIGNMENT="false"' * | xargs -I '{}' mv '{}' $HOME/bwa/Ecto_Ecto/folder_primary
+
+
+# Compile primary mapping data and add line numbers after removing soft clipped lines
+cd $HOME/bwa/Ecto_Ecto/folder_primary
+
+echo Checking for primary mapping files
+echo Checking for primary mapping files >> ../../$referencefile.$readsfile.log
+files=$(ls *.Ecto_Ectox.* 2> /dev/null | wc -l)
+echo $files files detected
+echo $files files detected >> ../../$referencefile.$readsfile.log
+
+if [ $files != 0 ]
+then
+  perl -i.bak -pe '/<S/d' $referencefile.Ecto_Ectox.*
+ #CHANGED TO ABOVE  sed -i '.bak' '/<S/d' $referencefile.Ecto_Ectox.*
+  mkdir backup
+  mv *.bak ./backup
+
+  grep -n '' $referencefile.Ecto_Ectox.* >> NumberedMatches.out || true
+  # Collect Mismatches, Insertions, Deletions
+  egrep '<I' NumberedMatches.out > NumberedInsertionsPrimarySide_EE.out || true
+  egrep '<D' NumberedMatches.out > NumberedDeletionsPrimarySide_EE.out || true
+  egrep 'mismatch' NumberedMatches.out > NumberedMismatchesPrimarySide_EE.out || true
+  # Now to cut out first column, sort, uniq count
+  cat NumberedInsertionsPrimarySide_EE.out | cut -d: -f2 > CutNumberedInsertionsPrimarySide_EE.out
+  cat NumberedDeletionsPrimarySide_EE.out | cut -d: -f2 > CutNumberedDeletionsPrimarySide_EE.out
+  cat NumberedMismatchesPrimarySide_EE.out | cut -d: -f2 > CutNumberedMismatchesPrimarySide_EE.out
+  # Now Count MID and subtract 9 from position because of lines of read information preceding matching lines information
+  echo -e "position\tcount" > CountedNumberedInsertionsPrimarySide_EE.txt
+  echo -e "position\tcount" > CountedNumberedDeletionsPrimarySide_EE.txt
+  echo -e "position\tcount" > CountedNumberedMismatchesPrimarySide_EE.txt
+  cat CutNumberedInsertionsPrimarySide_EE.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedInsertionsPrimarySide_EE.txt
+  cat CutNumberedDeletionsPrimarySide_EE.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedDeletionsPrimarySide_EE.txt
+  cat CutNumberedMismatchesPrimarySide_EE.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedMismatchesPrimarySide_EE.txt
+
+  rm *.out
+  rm -r backup || true
+  rm *x.*
+
+else
+  echo NO primary mapping site data to process
+fi
+
+# Compile secondary mapping data and add line numbers
+cd ../folder_secondary
+
+echo Checking for secondary mapping files
+echo Checking for secondary mapping files >> ../../$referencefile.$readsfile.log
+files=$(ls *.Ecto_Ectox.* 2> /dev/null | wc -l)
+echo $files files detected
+echo $files files detected >> ../../$referencefile.$readsfile.log
+
+if [ $files != 0 ]
+then
+  # Collect Mismatches, Insertions, Deletions
+  grep -n '' $referencefile.Ecto_Ectox.* >> NumberedMatches.out || true
+  egrep '<I' NumberedMatches.out > NumberedInsertionsSecondSide_EE.out || true
+  egrep '<D' NumberedMatches.out > NumberedDeletionsSecondSide_EE.out || true
+  egrep 'mismatch' NumberedMatches.out > NumberedMismatchesSecondSide_EE.out || true
+  # Now to cut out first column, sort, uniq count
+  cat NumberedInsertionsSecondSide_EE.out | cut -d: -f2 > CutNumberedInsertionsSecondSide_EE.out
+  cat NumberedDeletionsSecondSide_EE.out | cut -d: -f2 > CutNumberedDeletionsSecondSide_EE.out
+  cat NumberedMismatchesSecondSide_EE.out | cut -d: -f2 > CutNumberedMismatchesSecondSide_EE.out
+  # Now Count MID and subtract 9 from position because of lines of read information preceding matching lines information
+  echo -e "position\tcount" > CountedNumberedInsertionsSecondSide_EE.txt
+  echo -e "position\tcount" > CountedNumberedDeletionsSecondSide_EE.txt
+  echo -e "position\tcount" > CountedNumberedMismatchesSecondSide_EE.txt
+  cat CutNumberedInsertionsSecondSide_EE.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedInsertionsSecondSide_EE.txt
+  cat CutNumberedDeletionsSecondSide_EE.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedDeletionsSecondSide_EE.txt
+  cat CutNumberedMismatchesSecondSide_EE.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedMismatchesSecondSide_EE.txt
+
+  rm *.out
+  rm -r backup  || true
+  rm *x.*
+
+else
+  echo NO secondary mapping site data to process
+fi
+
+
+
+# ########################################
+# ECTOPIC READS WITHOUT TRANSLOCATIONS
+# ########################################
+
+echo
+echo
+echo ECTOPIC READS WITHOUT TRANSLOCATIONS BEING PROCESSED
+# Compile mapping data and add line numbers after removing soft clipped lines
+cd
+cd bwa  #CHANGED FROM bwa*
+echo Ectopic to Ectopic translocation mutations counted successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+cd NonChimeric
+
+echo Checking for primary mapping files
+echo Checking for primary mapping files >> ../../$referencefile.$readsfile.log
+files=$(ls *.NonChimericx.* 2> /dev/null | wc -l)
+echo $files files detected
+echo $files files detected >> ../../$referencefile.$readsfile.log
+
+if [ $files != 0 ]
+then
+  perl -i.bak -pe '/<S/d' $referencefile.NonChimericx.*
+  #CHANGED TO ABOVE sed -i '.bak' '/<S/d' $referencefile.NonChimericx.*
+  mkdir backup
+  mv *.bak ./backup
+
+  grep -n '' $referencefile.NonChimericx.* >> NumberedMatches.out || true
+  # Collect Mismatches, Insertions, Deletions
+  egrep '<I' NumberedMatches.out > NumberedInsertions_NT.out || true
+  egrep '<D' NumberedMatches.out > NumberedDeletions_NT.out || true
+  egrep 'mismatch' NumberedMatches.out > NumberedMismatches_NT.out || true
+  # Now to cut out first column, sort, uniq count
+  cat NumberedInsertions_NT.out | cut -d: -f2 > CutNumberedInsertions_NT.out
+  cat NumberedDeletions_NT.out | cut -d: -f2 > CutNumberedDeletions_NT.out
+  cat NumberedMismatches_NT.out | cut -d: -f2 > CutNumberedMismatches_NT.out
+  # Now Count MID and subtract 9 from position because of lines of read information preceding matching lines information
+  echo -e "position\tcount" > CountedNumberedInsertions_NT.txt
+  echo -e "position\tcount" > CountedNumberedDeletions_NT.txt
+  echo -e "position\tcount" > CountedNumberedMismatches_NT.txt
+  cat CutNumberedInsertions_NT.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedInsertions_NT.txt
+  cat CutNumberedDeletions_NT.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedDeletions_NT.txt
+  cat CutNumberedMismatches_NT.out | sort | uniq -c | awk  -v s=9 '{print $2-s, $1}' >> CountedNumberedMismatches_NT.txt
+
+  rm *.out
+  rm -r backup || true
+  rm *x.*
+
+else
+  echo NO primary mapping site data to processs
+fi
+
+
+
+# #########################################################################
+#
+# CLEANING UP AND ORGANIZING FOLDERS
+#
+# #########################################################################
+
+echo
+echo CLEANING UP AND ORGANIZING FOLDERS
+
+cd $HOME/bwa
+echo Non translocation reads mutations counted successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+echo " " >> $referencefile.$readsfile.log
+
+# rm
+rm $referencefile.bam
+rm *.out
+
+# mkdir
+mkdir package.$referencefile.$readsfile
+mkdir Original_Files
+mkdir Original_Index_and_Mapping
+mkdir Original_IGV_Tracks
+mkdir Original_XML_TSV_Files
+
+# mv
+mv *.Chrom_Chrom.* ./Chrom_Chrom/
+mv *.Ecto_Chrom.* ./Ecto_Chrom/
+mv *.Ecto_Ecto.* ./Ecto_Ecto/
+mv *.NonChimeric.* ./NonChimeric/
+
+mv Chrom_Chrom ./package.$referencefile.$readsfile/
+mv Ecto_Chrom ./package.$referencefile.$readsfile/
+mv Ecto_Ecto ./package.$referencefile.$readsfile/
+mv NonChimeric ./package.$referencefile.$readsfile/
+
+mv $referencefile ./Original_Files/
+mv $readsfile ./Original_Files/
+
+mv $referencefile.pac ./Original_Index_and_Mapping/
+mv $referencefile.ann ./Original_Index_and_Mapping/
+mv $referencefile.amb ./Original_Index_and_Mapping/
+mv $referencefile.bwt ./Original_Index_and_Mapping/
+mv $referencefile.sa ./Original_Index_and_Mapping/
+mv $referencefile.sam ./Original_Index_and_Mapping/
+
+mv $referencefile.sorted.bam ./Original_IGV_Tracks/
+mv $referencefile.sorted.bam.bai ./Original_IGV_Tracks/
+
+mv *.XMLlist.txt ./Original_XML_TSV_Files/
+mv *.TSVlist.txt ./Original_XML_TSV_Files/
+
+mv Original_Files ./package.$referencefile.$readsfile/
+mv Original_Index_and_Mapping ./package.$referencefile.$readsfile/
+mv Original_IGV_Tracks ./package.$referencefile.$readsfile/
+mv Original_XML_TSV_Files ./package.$referencefile.$readsfile/
+
+echo Files organized successfully >> $referencefile.$readsfile.log
+date >> $referencefile.$readsfile.log
+chmod 744 $referencefile.$readsfile.log
+echo $dirsource
+mv $referencefile.* ./package.$referencefile.$readsfile/
+# mv ./package.$referencefile.$readsfile/ $dirsource
+
+echo
+echo
+echo
+echo "Talent hits a target no one else can hit; genius hits a target no one else can see."
+echo "— Arthur Schopenhauer"
+echo
+echo
+echo " _  _  __  ____   ___  _  _  __  ____  ____  "     
+echo "( \/ )(  )/ ___) / __)/ )( \(  )(  __)(  __)  "    
+echo "/ \/ \ )( \___ \( (__ ) __ ( )(  ) _)  ) _)    "   
+echo "\_)(_/(__)(____/ \___)\_)(_/(__)(____)(__)      "  
+echo " _  _   __   __ _   __    ___  ____  ____        " 
+echo "( \/ ) / _\ (  ( \ / _\  / __)(  __)(    \        "
+echo "/ \/ \/    \/    //    \( (_ \ ) _)  ) D (        "
+echo "\_)(_/\_/\_/\_)__)\_/\_/ \___/(____)(____/        "
+echo
+echo
+echo
+echo "                   0-0  "
+echo
+echo
+
+exit 0
