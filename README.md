@@ -19,8 +19,10 @@ Automation for a pipeline to identify and extract translocation and mutation inf
  Modified to include file arguments and compatibility with Darwin 
  and Ubuntu by S. Dean Rider Jr. and David C. Hitch January 2022.
 
- Example use: bash TransMuteDCH2 referencefile.fa readsfile.fa
+ Example use: 
+      bash TransMuteDCH2 referencefile.fa readsfile.fa
  
- Example use: bash TransMuteDCH2
+ Example use: 
+      bash TransMuteDCH2
       
-      then enter filenames when requested
+ then enter filenames when requested
